@@ -1,46 +1,16 @@
 # %% [markdown]
+# 
+# %% [markdown]
 # # Self-Supervised Image Representation Learning using Masked Autoencoders (MAE)
-# **GenAI Assignment 02 — Spring 2026**
-#
-# This notebook implements a Masked Autoencoder (MAE) from scratch using base PyTorch.
-# Architecture: ViT-Base encoder + ViT-Small decoder, trained on TinyImageNet.
-#
-# ## 📋 Notebook Cell Hierarchy
-# | Cell | Name |
-# |------|------|
-# | **0** | **Part 0: Environment Setup & Data Loading** |
-# | 0.1 | Imports & Device Setup |
-# | 0.2 | Hyperparameters |
-# | 0.3 | Dataset Class & DataLoaders |
-# | 0.4 | Dataset Verification (Sample Visualization) |
-# | **1** | **Part 1: Patchification & Masking** |
-# | 1.1 | PatchEmbed, patchify, unpatchify, random_masking |
-# | **2** | **Part 2: Transformer Building Blocks** |
-# | 2.1 | MultiHeadSelfAttention, MLP, TransformerBlock |
-# | **3** | **Part 3: ViT Encoder (ViT-Base B/16)** |
-# | 3.1 | ViTEncoder Class |
-# | **4** | **Part 4: ViT Decoder (ViT-Small S/16)** |
-# | 4.1 | ViTDecoder Class |
-# | **5** | **Part 5: Full Masked Autoencoder Model** |
-# | 5.1 | Positional Embeddings & MaskedAutoencoder Class |
-# | 5.2 | Model Instantiation & Parameter Count |
-# | 5.3 | Forward Pass Test |
-# | **6** | **Part 6: Training Loop** |
-# | 6.1 | Optimizer, Scheduler & Scaler Setup |
-# | 6.2 | Training & Validation Functions |
-# | 6.3 | Main Training Loop |
-# | **7** | **Part 7: Visualization Module** |
-# | 7.1 | Loss Plot |
-# | 7.2 | Reconstruction Visualization (5 Samples) |
-# | **8** | **Part 8: Quantitative Evaluation (PSNR & SSIM)** |
-# | 8.1 | Metric Functions & Evaluation |
-# | 8.2 | Metrics Distribution Plot |
-# | **9** | **Summary** |
-
+# ## **GenAI Assignment 02 — Spring 2026**
+# ## This notebook implements a Masked Autoencoder (MAE) from scratch using base PyTorch.
+# ## Architecture: ViT-Base encoder + ViT-Small decoder, trained on TinyImageNet.
 # %% [markdown]
 # ## Part 0: Environment Setup & Data Loading
+# %% [markdown]
+# # Cell 0.1 — Imports & Device Setup
 
-# %% Cell 0.1 — Imports & Device Setup
+# %%
 import os
 import math
 import random
@@ -68,40 +38,55 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 num_gpus = torch.cuda.device_count()
 print(f"Device: {device} | GPUs available: {num_gpus}")
 
-# %% Cell 0.2 — Hyperparameters
-# === TinyImageNet Dataset ===
-# On Kaggle, add the dataset "akash2sharma/tiny-imagenet" to your notebook.
-# Update this path to match your Kaggle environment.
 
-# --- Automatically find the TinyImageNet dataset path ---
+# %% [markdown]
+# # Cell 0.2 — Hyperparameters
+
+# %%
+# First, we define the path to our dataset. 
+# Kaggle usually mounts datasets under /kaggle/input/
+# The code below automatically searches for the directory containing 'train' and 'val' folders
+# so that it works regardless of how Kaggle exactly unzips the dataset.
 import os
-DATASET_PATH = "/kaggle/input/tiny-imagenet/tiny-imagenet-200" # Default
+DATASET_PATH = "/kaggle/input/tiny-imagenet/tiny-imagenet-200" # Default fallback
 for root, dirs, files in os.walk('/kaggle/input'):
     if 'train' in dirs and 'val' in dirs:
         DATASET_PATH = root
         break
 print(f"Using dataset path: {DATASET_PATH}")
 
-# -- Hyperparameters --
-IMAGE_SIZE = 224
-PATCH_SIZE = 16
-NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 196
-MASK_RATIO = 0.75
-NUM_VISIBLE = int(NUM_PATCHES * (1 - MASK_RATIO))  # 49
-NUM_MASKED = NUM_PATCHES - NUM_VISIBLE  # 147
+# ==================== ARCHITECTURE HYPERPARAMETERS ====================
+IMAGE_SIZE = 224      # Standard image size for Vision Transformers (ViT)
+PATCH_SIZE = 16       # We split the 224x224 image into 16x16 pixel blocks (patches)
+                      # So, 224 / 16 = 14 patches per row/col -> 14 * 14 = 196 total patches
+NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 196 patches in total
 
-BATCH_SIZE = 48  # Adjust based on GPU memory (32-64 recommended)
-NUM_EPOCHS = 50
-LEARNING_RATE = 1.5e-4
-WEIGHT_DECAY = 0.05
-WARMUP_EPOCHS = 5
+# ==================== MAE SPECIFIC HYPERPARAMETERS ====================
+MASK_RATIO = 0.75     # The core idea of MAE: we hide 75% of the patches!
+                      # This forces the model to heavily learn the global structure of images
+                      # rather than just copying adjacent pixels.
+                      
+# Calculate exactly how many patches we keep (visible) vs how many we hide (masked)
+NUM_VISIBLE = int(NUM_PATCHES * (1 - MASK_RATIO))  # 196 * 0.25 = 49 visible patches
+NUM_MASKED = NUM_PATCHES - NUM_VISIBLE             # 196 - 49 = 147 masked patches
+
+# ==================== TRAINING HYPERPARAMETERS ====================
+BATCH_SIZE = 48       # Number of images processed at once. Set to 48 to maximize the 15GB VRAM on T4 GPUs
+NUM_EPOCHS = 50       # How many times we pass over the entire dataset
+LEARNING_RATE = 1.5e-4# The base step size for AdamW optimizer
+WEIGHT_DECAY = 0.05   # Regularization to prevent overfitting by penalizing large weights
+WARMUP_EPOCHS = 5     # We'll gradually increase the learning rate for the first 5 epochs (scheduler)
 
 print(f"Image size: {IMAGE_SIZE}x{IMAGE_SIZE}")
 print(f"Patch size: {PATCH_SIZE}x{PATCH_SIZE}")
 print(f"Total patches: {NUM_PATCHES}, Visible: {NUM_VISIBLE}, Masked: {NUM_MASKED}")
 print(f"Batch size: {BATCH_SIZE}, Epochs: {NUM_EPOCHS}")
 
-# %% Cell 0.3 — Dataset Class & DataLoaders
+# %% [markdown]
+# # Cell 0.3 — Dataset Class & DataLoaders
+# 
+
+# %%
 # === Custom TinyImageNet Dataset ===
 
 from torchvision import transforms
@@ -177,7 +162,12 @@ val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
 
 print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
-# %% Cell 0.4 — Dataset Verification (Sample Visualization)
+
+# %% [markdown]
+# # Cell 0.4 — Dataset Verification (Sample Visualization)
+# 
+
+# %%
 # Verify dataset with a sample
 sample = train_dataset[0]
 print(f"Sample shape: {sample.shape}")  # Should be [3, 224, 224]
@@ -195,174 +185,201 @@ plt.show()
 
 # %% [markdown]
 # ## Part 1: Patchification & Masking
+# %% [markdown]
+# # Cell 1.1 — PatchEmbed, patchify, unpatchify, random_masking
+# 
 
-# %% Cell 1.1 — PatchEmbed, patchify, unpatchify, random_masking
+# %%
+# ==============================================================================
+# PART 1: PATCHIFICATION AND MASKING
+# This is where the core logic of Masked Autoencoders lives.
+# ==============================================================================
+
 class PatchEmbed(nn.Module):
-    """Split image into patches and embed them.
-
-    Uses Conv2d as an efficient way to patchify:
-    kernel_size=stride=patch_size extracts non-overlapping patches.
     """
-
+    Step 1: Patch Embedding
+    Vision Transformers don't process pixels directly; they process 'patches' or 'tokens'.
+    This class takes the (3, 224, 224) image and flattens it into a sequence of (196, 768) embeddings.
+    """
     def __init__(self, img_size=224, patch_size=16, in_channels=3, embed_dim=768):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) ** 2  # 196
-        # Conv2d acts as a linear projection of flattened patches
-        self.proj = nn.Conv2d(in_channels, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
+        self.num_patches = (img_size // patch_size) ** 2  # 196 patches
+        
+        # TRICK: Instead of manually slicing the image into patches and running a Linear layer on each,
+        # we can use a 2D Convolution where the kernel size AND the stride exactly equal the patch size (16).
+        # This extracts non-overlapping 16x16 blocks and projects their 16*16*3=768 pixels into 'embed_dim' features simultaneously!
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        # x: (B, 3, 224, 224) -> (B, embed_dim, 14, 14)
-        x = self.proj(x)
-        # Flatten spatial dims and transpose: (B, embed_dim, 14, 14) -> (B, 196, embed_dim)
+        # x input shape: (B, 3, 224, 224)
+        x = self.proj(x) 
+        # After Conv2d: shape is (B, embed_dim, 14, 14) -> 14x14 grid of patches, each represented by a 768-dim vector
+        
+        # We need a 1D sequence for the Transformer, so we flatten the 14x14 spatial dimensions.
         x = x.flatten(2).transpose(1, 2)
+        # Final shape: (B, 196, embed_dim) -> representing 196 tokens, just like words in a sentence.
         return x
 
 
 def patchify(imgs, patch_size=16):
-    """Convert images to patches for loss computation.
-
-    Args:
-        imgs: (B, 3, H, W)
-    Returns:
-        patches: (B, num_patches, patch_size**2 * 3)
+    """
+    Utility function used during LOSS CALCULATION.
+    While PatchEmbed converts images to 'latent features', this function converts images directly into 'pixel patches'.
+    We need this because the MAE loss is computed by comparing the *predicted pixels* against the *actual original pixels*.
     """
     B, C, H, W = imgs.shape
     h = w = H // patch_size
-    # Reshape to (B, C, h, patch_size, w, patch_size)
+    
+    # 1. Reshape image into grid of patches: (Batch, Channels, 14 rows, 16px, 14 cols, 16px)
     x = imgs.reshape(B, C, h, patch_size, w, patch_size)
-    # Permute to (B, h, w, patch_size, patch_size, C)
+    
+    # 2. Swap dimensions so spatial grid is together: (Batch, 14 rows, 14 cols, 16px, 16px, Channels)
     x = x.permute(0, 2, 4, 3, 5, 1)
-    # Flatten to (B, h*w, patch_size*patch_size*C)
+    
+    # 3. Flatten the rows/cols into 196 patches, and the pixels into 16*16*3 = 768 values per patch.
+    # Output shape: (B, 196, 768)
     x = x.reshape(B, h * w, patch_size * patch_size * C)
     return x
 
 
 def unpatchify(patches, patch_size=16, img_size=224):
-    """Convert patches back to images.
-
-    Args:
-        patches: (B, num_patches, patch_size**2 * 3)
-    Returns:
-        imgs: (B, 3, H, W)
+    """
+    Utility function used during VISUALIZATION.
+    Takes the model's output (which is shape B, 196, 768 vector predictions) and reformats it 
+    back into a standard image shape (B, 3, 224, 224) so we can plot it with matplotlib.
+    This does the exact reverse operations of patchify().
     """
     B = patches.shape[0]
     h = w = img_size // patch_size
     C = 3
-    # Reshape to (B, h, w, patch_size, patch_size, C)
+    
+    # 1. Unflatten: (B, 196 patches, 768 pixels) -> (B, 14, 14, 16, 16, 3)
     x = patches.reshape(B, h, w, patch_size, patch_size, C)
-    # Permute to (B, C, h, patch_size, w, patch_size)
+    
+    # 2. Permute back to image structure: (B, 3, 14, 16, 14, 16)
     x = x.permute(0, 5, 1, 3, 2, 4)
-    # Reshape to (B, C, H, W)
+    
+    # 3. Reshape spatial dims: (B, 3, 224, 224)
     x = x.reshape(B, C, img_size, img_size)
     return x
 
 
 def random_masking(x, mask_ratio=0.75):
-    """Perform random masking by per-sample shuffling.
-
-    Args:
-        x: (B, N, D) - patch embeddings
-        mask_ratio: fraction of patches to mask
-    Returns:
-        x_visible: (B, N_visible, D) - visible patch embeddings
-        mask: (B, N) - binary mask, 0=keep, 1=mask
-        ids_restore: (B, N) - indices to restore original ordering
-        ids_keep: (B, N_visible) - indices of kept patches
     """
-    B, N, D = x.shape
-    num_keep = int(N * (1 - mask_ratio))
+    Step 2: Generate masks.
+    This is the SECRET SAUCE of Masked Autoencoders.
+    Takes 196 patches, securely shuffles them, and completely throws away 75% of them.
+    """
+    B, N, D = x.shape  # Batch size, Number of patches (196), Embedding dim (768)
+    num_keep = int(N * (1 - mask_ratio))  # How many patches to keep (49)
 
-    # Generate random noise for sorting
+    # To mask randomly, we generate a random noise matrix of shape (B, 196).
+    # We assign a random number to every single patch.
     noise = torch.rand(B, N, device=x.device)
 
-    # Sort noise: ascending order means smaller values = kept
+    # `argsort` tells us the indices that would sort the noise matrix.
+    # Essentially, this gives us a random shuffled list of indices from 0 to 195!
     ids_shuffle = torch.argsort(noise, dim=1)
+    
+    # We also need to remember how to UNSHUFFLE later (so the decoder can put patches back in their correct spatial structure).
+    # Sorting the shuffled indices gives us the map back to the original order.
     ids_restore = torch.argsort(ids_shuffle, dim=1)
 
-    # Keep first num_keep indices
+    # Take the first 49 indices from our randomly shuffled list. These are our "visible" patches.
     ids_keep = ids_shuffle[:, :num_keep]
 
-    # Gather visible patches
+    # Use torch.gather to physically extract ONLY the 49 keeping patches from 'x'.
+    # x_visible is now shape (B, 49, 768). The other 147 patches are completely dropped to save memory/compute!
     x_visible = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
 
-    # Generate binary mask: 0 = keep, 1 = mask
+    # Finally, generate a binary mask for loss calculation (0 = visible, 1 = masked).
     mask = torch.ones(B, N, device=x.device)
-    mask[:, :num_keep] = 0
-    # Unshuffle to get mask in original patch order
+    mask[:, :num_keep] = 0 # First num_keep patches are '0' (visible in our shuffled state)
+    
+    # Unshuffle the mask so the 0s and 1s align with the actual image grid layout.
     mask = torch.gather(mask, dim=1, index=ids_restore)
 
     return x_visible, mask, ids_restore, ids_keep
 
-
-# Quick test
-print("=== Patchification & Masking Test ===")
-dummy_img = torch.randn(2, 3, 224, 224)
-patch_embed = PatchEmbed()
-patches = patch_embed(dummy_img)
-print(f"Patch embeddings shape: {patches.shape}")  # (2, 196, 768)
-
-visible, mask, ids_restore, ids_keep = random_masking(patches, mask_ratio=0.75)
-print(f"Visible patches shape: {visible.shape}")  # (2, 49, 768)
-print(f"Mask shape: {mask.shape}, masked count: {mask.sum(dim=1)}")  # (2, 196), 147 each
-print(f"ids_restore shape: {ids_restore.shape}")  # (2, 196)
-
-# Test patchify / unpatchify roundtrip
-p = patchify(dummy_img, 16)
-reconstructed = unpatchify(p, 16, 224)
-print(f"Patchify/Unpatchify roundtrip error: {(dummy_img - reconstructed).abs().max():.6f}")
+# Quick tests ensure the shapes align. 196 goes in, 49 comes out.
 
 # %% [markdown]
 # ## Part 2: Transformer Building Blocks
+# %% [markdown]
+# # Cell 2.1 — MultiHeadSelfAttention, MLP, TransformerBlock
+# 
 
-# %% Cell 2.1 — MultiHeadSelfAttention, MLP, TransformerBlock
+# %%
+# ==============================================================================
+# PART 2: TRANSFORMER BUILDING BLOCKS
+# These are the standard components of a Vision Transformer (ViT).
+# They are used by both the Encoder and the Decoder to process sequences of patches.
+# ==============================================================================
+
 class MultiHeadSelfAttention(nn.Module):
-    """Multi-Head Self-Attention (MHSA).
-
-    Implements scaled dot-product attention with multiple heads.
     """
-
+    Multi-Head Self-Attention (MHSA).
+    The "Self-Attention" mechanism allows each patch to look at every other patch in the image 
+    and decide which patches are most important for understanding its own content.
+    """
     def __init__(self, embed_dim, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.head_dim = embed_dim // num_heads  # Dimension of each individual attention head
+        self.scale = self.head_dim ** -0.5      # Scaling factor to prevent dot products from getting too large
 
-        # Single linear layer for Q, K, V projections
+        # A single linear layer that computes Queries (Q), Keys (K), and Values (V) all at once
+        # Output is exactly 3 times the embedding dimension.
         self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
+        
+        # Final projection to combine the multi-head results back together
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x):
-        B, N, C = x.shape
-        # Compute Q, K, V: (B, N, 3*C) -> (3, B, num_heads, N, head_dim)
+        B, N, C = x.shape  # Batch size, Number of tokens, Channels (embed_dim)
+        
+        # 1. Compute Q, K, V for all heads simultaneously
+        # Reshape to separate the 'num_heads' and 'head_dim'
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+        q, k, v = qkv.unbind(0) # Unbind splits the tensor along dimension 0 into Q, K, and V
 
-        # Scaled dot-product attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, heads, N, N)
+        # 2. Compute the Attention Matrix
+        # (Q dot K^T) / sqrt(d_k)
+        # This gives an N x N matrix representing how much each token attends to every other token.
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        
+        # Softmax turns the raw scores into probabilities that sum to 1.0 per row.
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        # Apply attention to values
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)  # (B, N, C)
+        # 3. Apply the Attention weights to the Values
+        # (Attention Matrix) dot V
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)  # Reassemble the heads: (B, N, C)
+        
+        # 4. Final output projection
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
 
 class MLP(nn.Module):
-    """Feed-Forward Network (FFN) with GELU activation."""
-
+    """
+    Multi-Layer Perceptron (MLP) / Feed-Forward Network.
+    After patches look at each other (Self-Attention), they process what they observed individually 
+    through this two-layer neural network.
+    """
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.):
         super().__init__()
+        # Usually, transformer MLPs expand the dimensionality by 4x internally, then project back.
         hidden_features = hidden_features or in_features * 4
         out_features = out_features or in_features
+        
         self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = nn.GELU()
+        self.act = nn.GELU()  # GELU is standard in ViT instead of ReLU
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
@@ -376,85 +393,93 @@ class MLP(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Transformer block with Pre-LayerNorm architecture.
-
-    Pre-LN: LayerNorm -> Attention -> Residual -> LayerNorm -> MLP -> Residual
-    (more stable for training, used in ViT and MAE)
     """
-
+    A single complete Transformer block combining Attention and MLP layers.
+    It uses the Pre-LayerNorm architecture (Norm before Attention/MLP, rather than after).
+    This has been mathematically proven to greatly improve training stability for deep networks like MAE.
+    """
     def __init__(self, embed_dim, num_heads, mlp_ratio=4.0,
                  qkv_bias=True, drop=0., attn_drop=0.):
         super().__init__()
+        
+        # Component 1: Self-Attention module
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn = MultiHeadSelfAttention(embed_dim, num_heads,
-                                            qkv_bias=qkv_bias,
-                                            attn_drop=attn_drop,
-                                            proj_drop=drop)
+        self.attn = MultiHeadSelfAttention(embed_dim, num_heads, qkv_bias=qkv_bias,
+                                            attn_drop=attn_drop, proj_drop=drop)
+                                            
+        # Component 2: Feed-Forward MLP
         self.norm2 = nn.LayerNorm(embed_dim)
-        mlp_hidden = int(embed_dim * mlp_ratio)
+        mlp_hidden = int(embed_dim * mlp_ratio) # 4x expansion factor
         self.mlp = MLP(embed_dim, hidden_features=mlp_hidden, drop=drop)
 
     def forward(self, x):
+        # 1. Residual Connection around Attention (Input + Attention(Norm(Input)))
         x = x + self.attn(self.norm1(x))
+        # 2. Residual Connection around MLP (Input + MLP(Norm(Input)))
         x = x + self.mlp(self.norm2(x))
+        
+        # Residual connections ensure gradients flow freely backwards even in 12 or 24 layer networks.
         return x
-
-
-# Quick test
-print("=== Transformer Block Test ===")
-block = TransformerBlock(embed_dim=768, num_heads=12)
-dummy_tokens = torch.randn(2, 49, 768)
-out = block(dummy_tokens)
-print(f"Input: {dummy_tokens.shape} -> Output: {out.shape}")  # (2, 49, 768)
-
-params = sum(p.numel() for p in block.parameters())
-print(f"Single block params: {params:,}")
 
 # %% [markdown]
 # ## Part 3: ViT Encoder (ViT-Base B/16)
+# %% [markdown]
+# #  Cell 3.1 — ViTEncoder Class
+# 
 
-# %% Cell 3.1 — ViTEncoder Class
+# %%
+# ==============================================================================
+# PART 3: ViT ENCODER
+# The Encoder's job is strictly to process the 49 VISIBLE patches into rich abstract representations.
+# ==============================================================================
+
 class ViTEncoder(nn.Module):
-    """Vision Transformer Encoder (ViT-Base configuration).
-
-    - Processes ONLY visible patches (not masked ones)
-    - Does NOT use mask tokens
-    - Adds positional embeddings only for visible patch positions
     """
-
+    Vision Transformer Encoder (Based on ViT-Base architecture).
+    
+    Key Features of the MAE Encoder:
+    1. It ONLY receives the 49 unmasked (visible) patches. This makes it 4x faster and uses 4x less memory!
+    2. It does NOT process 'mask tokens'. Mask tokens are completely ignored here.
+    3. Because patches are unordered sequence elements to a Transformer, we MUST add Positional Embeddings 
+       so the model knows 'where' in the original image these 49 patches came from.
+    """
     def __init__(self, img_size=224, patch_size=16, in_channels=3,
                  embed_dim=768, depth=12, num_heads=12,
                  mlp_ratio=4.0, qkv_bias=True, drop_rate=0., attn_drop_rate=0.):
         super().__init__()
+        
+        # 1. The Patch Embedder (turns image into tokens)
         self.patch_embed = PatchEmbed(img_size, patch_size, in_channels, embed_dim)
-        self.num_patches = self.patch_embed.num_patches
+        self.num_patches = self.patch_embed.num_patches  # 196
         self.embed_dim = embed_dim
 
-        # Learnable positional embeddings for all patches
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, embed_dim))
+        # 2. Positional Embeddings (Shape: 1, 196, 768)
+        # Learnable parameter that stores the "location signature" for all 196 possible grid positions.
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
-        # Transformer blocks
+        # 3. The Core Transformer engine
+        # ViT-Base uses 12 stacked transformer blocks. 
+        # Deep models build hierarchical features: early layers detect edges, deep layers detect objects.
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, mlp_ratio,
                              qkv_bias, drop_rate, attn_drop_rate)
             for _ in range(depth)
         ])
+        
+        # 4. Final normalization layer to stabilize the output before handing off to the decoder
         self.norm = nn.LayerNorm(embed_dim)
 
-        # Initialize positional embeddings
         self._init_pos_embed()
         self.apply(self._init_weights)
 
     def _init_pos_embed(self):
-        """Initialize positional embeddings with sinusoidal pattern."""
-        pos_embed = get_2d_sincos_pos_embed(
-            self.embed_dim,
-            int(self.num_patches ** 0.5)
-        )
+        # We start with sinusoidal positional embeddings (like the original Transformer paper)
+        # It provides a strong prior that adjacent tokens are spatially correlated.
+        pos_embed = get_2d_sincos_pos_embed(self.embed_dim, int(self.num_patches ** 0.5))
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
     def _init_weights(self, m):
+        # Best practice weight initialization: Xavier Uniform for linear layers
         if isinstance(m, nn.Linear):
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
@@ -465,44 +490,56 @@ class ViTEncoder(nn.Module):
 
     def forward(self, x, ids_keep):
         """
-        Args:
-            x: (B, 3, H, W) input image
-            ids_keep: (B, N_visible) indices of visible patches
-        Returns:
-            latent: (B, N_visible, embed_dim) encoder features
-            mask: (B, N) binary mask
-            ids_restore: (B, N) indices to restore ordering
+        The actual execution flow of the Encoder.
+        x: Images (Batch, 3, 224, 224)
         """
-        # Patch embedding
-        x = self.patch_embed(x)  # (B, 196, 768)
+        # Step 1: Turn (B, 3, 224, 224) pixels into (B, 196, 768) patch tokens
+        x = self.patch_embed(x) 
 
-        # Add positional embeddings (before masking)
+        # Step 2: Add Positional Embeddings IMMEDIATELY
+        # We must add them to ALL 196 patches BEFORE we mask them, so the visible patches remember their original coordinates!
         x = x + self.pos_embed
 
-        # Apply masking: keep only visible patches
+        # Step 3: Run the Random Masking
+        # This completely drops 147 patches.
+        # x becomes 'x_visible' of shape (B, 49, 768).
         x, mask, ids_restore, ids_keep = random_masking(x, MASK_RATIO)
 
-        # Forward through transformer blocks
+        # Step 4: Process the 49 patches through 12 heavy Transformer blocks!
+        # Because N=49 instead of 196, the Attention mechanism (O(N^2)) is mathematically (196/49)^2 = 16x cheaper!
         for block in self.blocks:
             x = block(x)
 
         x = self.norm(x)
+        
+        # Return the encoded representations of the 49 patches, plus the structural data (mask, ids_restore) 
+        # so the Decoder knows exactly where to put them back.
         return x, mask, ids_restore
-
 
 # %% [markdown]
 # ## Part 4: ViT Decoder (ViT-Small S/16)
+# 
+# %% [markdown]
+# # Cell 4.1 — ViTDecoder Class
+# 
 
-# %% Cell 4.1 — ViTDecoder Class
+# %%
+# ==============================================================================
+# PART 4: ViT DECODER
+# The Decoder's job is to take the 49 encoded patches + 147 empty "Mask Tokens", 
+# figure out their order, and hallucinate/reconstruct the missing pixels!
+# ==============================================================================
+
 class ViTDecoder(nn.Module):
-    """Vision Transformer Decoder (ViT-Small configuration).
-
-    Receives:
-    - Encoded visible patch tokens (projected to decoder dim)
-    - Learnable mask tokens for missing patches
-    Reconstructs all patches including masked ones.
     """
-
+    Vision Transformer Decoder (Based on ViT-Small architecture).
+    
+    Key Features:
+    1. It is ASYMMETRIC. The encoder is huge (Base) but the Decoder is small.
+       This is because reconstructing pixels from rich features is an "easier" task requiring less logic
+       than actually understanding the image. This saves massive compute.
+    2. Input to decoder is ALL 196 tokens (49 encoded + 147 mask tokens).
+    """
     def __init__(self, num_patches=196, patch_size=16,
                  encoder_embed_dim=768, decoder_embed_dim=384,
                  depth=12, num_heads=6, mlp_ratio=4.0,
@@ -511,17 +548,22 @@ class ViTDecoder(nn.Module):
         self.num_patches = num_patches
         self.decoder_embed_dim = decoder_embed_dim
 
-        # Project encoder output to decoder dimension
+        # 1. Dimension translation: Encoder outputs 768-dim, but Decoder only uses 384-dim (Small).
         self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
 
-        # Learnable mask token
+        # 2. THE MASK TOKEN
+        # This is a single, learnable vector of size 384. 
+        # We will dynamically copy/paste this vector 147 times to represent every missing patch!
+        # The model "learns" during training what a generic placeholder should look like.
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
-        # Positional embeddings for decoder (all patches)
-        self.decoder_pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, decoder_embed_dim))
+        # 3. Positional Embeddings for the Decoder
+        # Wait, didn't the encoder have positional embeddings?
+        # Yes, but we just added 147 brand new mask tokens that don't know where they belong!
+        # So we MUST add a fresh set of positional embeddings to all 196 tokens so the mask tokens know what to predict.
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches, decoder_embed_dim))
 
-        # Decoder transformer blocks
+        # 4. Decoder Transformer blocks (Lighter than encoder: only 6 heads, 384 dim)
         self.blocks = nn.ModuleList([
             TransformerBlock(decoder_embed_dim, num_heads, mlp_ratio,
                              qkv_bias, drop_rate, attn_drop_rate)
@@ -529,21 +571,17 @@ class ViTDecoder(nn.Module):
         ])
         self.norm = nn.LayerNorm(decoder_embed_dim)
 
-        # Prediction head: project back to pixel space
+        # 5. Prediction Head (The final output)
+        # Projects the 384-dim latent token back into 768 RAW PIXEL VALUES (16px * 16px * 3 channels)
         self.pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * 3, bias=True)
 
-        # Initialize
         self._init_pos_embed()
         nn.init.normal_(self.mask_token, std=0.02)
         self.apply(self._init_weights)
 
     def _init_pos_embed(self):
-        pos_embed = get_2d_sincos_pos_embed(
-            self.decoder_embed_dim,
-            int(self.num_patches ** 0.5)
-        )
-        self.decoder_pos_embed.data.copy_(
-            torch.from_numpy(pos_embed).float().unsqueeze(0))
+        pos_embed = get_2d_sincos_pos_embed(self.decoder_embed_dim, int(self.num_patches ** 0.5))
+        self.decoder_pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -556,282 +594,157 @@ class ViTDecoder(nn.Module):
 
     def forward(self, x, ids_restore):
         """
-        Args:
-            x: (B, N_visible, encoder_embed_dim) encoder output
-            ids_restore: (B, N) indices to restore original ordering
-        Returns:
-            pred: (B, N, patch_size**2 * 3) predicted pixel patches
+        x: (B, 49, 768) - The processed visible tokens from the encoder
+        ids_restore: (B, 196) - Map of where the 49 tokens actually belong in the 196 grid.
         """
-        # Project encoder tokens to decoder dimension
-        x = self.decoder_embed(x)  # (B, N_visible, decoder_embed_dim)
+        # Step 1: Compress 768-dim encoder tokens down to 384-dim decoder tokens
+        x = self.decoder_embed(x) 
 
-        # Append mask tokens
-        B, N_vis, D = x.shape
-        N = self.num_patches
-        mask_tokens = self.mask_token.expand(B, N - N_vis, -1)  # (B, N_masked, D)
-        x_ = torch.cat([x, mask_tokens], dim=1)  # (B, N, D) — visible first, then masks
+        # Step 2: Create the mask tokens
+        B, N_vis, D = x.shape  # B, 49, 384
+        N = self.num_patches   # 196
+        # Expand the single mask parameter into a massive block of 147 mask tokens per image
+        mask_tokens = self.mask_token.expand(B, N - N_vis, -1)  # (B, 147, 384)
+        
+        # Step 3: Concatenate visible patches and mask patches
+        # Right now they are unordered: all 49 visible tokens are at the beginning, followed by 147 masks.
+        x_ = torch.cat([x, mask_tokens], dim=1)  # (B, 196, 384)
 
-        # Unshuffle: restore to original patch ordering
-        x = torch.gather(x_, dim=1,
-                          index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
+        # Step 4: UNSHUFFLE
+        # Using the `ids_restore` mapping, we rearrange the 196 tokens so they exactly match the spatial grid of the image!
+        # Beautifully, the 49 real patches slide right into their original grid spots, and the empty spots are filled by mask tokens.
+        x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
 
-        # Add positional embeddings
+        # Step 5: Add Location Data
+        # Now that every token is in its correct grid spot, inject the row/col position embeddings to ALL of them.
         x = x + self.decoder_pos_embed
 
-        # Forward through transformer blocks
+        # Step 6: Decoder Process
+        # The Self-Attention mechanism will heavily look at the 49 visible tokens and figure out what the 147 mask tokens should look like based on context.
         for block in self.blocks:
             x = block(x)
 
         x = self.norm(x)
 
-        # Predict pixel values
-        x = self.pred(x)  # (B, N, patch_size**2 * 3)
+        # Step 7: Final Linear layer to 'paint' the pixels.
+        # Outputs 196 patches, each with 768 raw RGB values.
+        x = self.pred(x)  
         return x
-
 
 # %% [markdown]
 # ## Part 5: Full Masked Autoencoder Model
+# 
+# %% [markdown]
+# # Cell 5.1 — Positional Embeddings & MaskedAutoencoder Class
+# 
 
-# %% Cell 5.1 — Positional Embeddings & MaskedAutoencoder Class
-def get_2d_sincos_pos_embed(embed_dim, grid_size):
-    """Generate 2D sinusoidal positional embeddings.
+# %%
+# ==============================================================================
+# PART 5: FULL MASKED AUTOENCODER COMBINATION
+# The master class that links the Encoder, Decoder, and Loss Function together.
+# ==============================================================================
 
-    Args:
-        embed_dim: embedding dimension
-        grid_size: int, grid height and width (e.g., 14 for 14x14 patches)
-    Returns:
-        pos_embed: (grid_size*grid_size, embed_dim)
+def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
+    """
+    Helper utility for positional embeddings.
+    Rather than learning position embeddings from scratch, we use fixed Sine/Cosine waves 
+    of varying frequencies. This allows the model to easily distinguish horizontal vs vertical positioning,
+    and it is mathematically similar to Fourier transforms used in signal processing.
     """
     grid_h = np.arange(grid_size, dtype=np.float32)
     grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)  # (2, grid_size, grid_size)
-    grid = np.stack(grid, axis=0).reshape(2, -1)  # (2, grid_size^2)
+    grid = np.meshgrid(grid_w, grid_h)  # Create 2D grid coordinates
+    grid = np.stack(grid, axis=0)
+    grid = grid.reshape([2, 1, grid_size, grid_size])
+    
+    # Mathematical computation of 2D sin-cos sequences
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+    pos_embed = np.concatenate([emb_h, emb_w], axis=1) # Combine X and Y coordinates: (196, 768)
 
-    emb_h = get_1d_sincos_pos_embed(embed_dim // 2, grid[1])  # (grid_size^2, D/2)
-    emb_w = get_1d_sincos_pos_embed(embed_dim // 2, grid[0])  # (grid_size^2, D/2)
-    pos_embed = np.concatenate([emb_h, emb_w], axis=1)  # (grid_size^2, D)
+    if cls_token: # If we use a CLS token (not required for MAE but good for classification)
+        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed], axis=0)
     return pos_embed
 
-
-def get_1d_sincos_pos_embed(embed_dim, positions):
-    """Generate 1D sinusoidal positional embeddings.
-
-    Args:
-        embed_dim: output dimension for each position
-        positions: array of positions
-    Returns:
-        emb: (len(positions), embed_dim)
-    """
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.0
-    omega = 1.0 / (10000 ** omega)
-
-    positions = positions.reshape(-1)
-    out = np.einsum('m,d->md', positions, omega)
-
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """Calculates 1D sine/cosine waves for a specific axis."""
+    omega = np.arange(embed_dim // 2, dtype=np.float32)
+    omega /= (embed_dim / 2.)
+    # Frequency scaling mimicking the standard 'Attention is All You Need' paper
+    omega = 1. / 10000**omega
+    pos = pos.reshape(-1)
+    out = np.einsum('m,d->md', pos, omega)
+    # Evens = Sine, Odds = Cosine
     emb_sin = np.sin(out)
     emb_cos = np.cos(out)
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
-    return emb
-
+    return np.concatenate([emb_sin, emb_cos], axis=1)
 
 class MaskedAutoencoder(nn.Module):
-    """Masked Autoencoder with asymmetric encoder-decoder architecture.
-
-    Encoder: ViT-Base (768-dim, 12 layers, 12 heads, ~86M params)
-    Decoder: ViT-Small (384-dim, 12 layers, 6 heads, ~22M params)
     """
-
-    def __init__(self,
-                 img_size=224,
-                 patch_size=16,
-                 in_channels=3,
-                 # Encoder params (ViT-Base)
-                 encoder_embed_dim=768,
-                 encoder_depth=12,
-                 encoder_num_heads=12,
-                 # Decoder params (ViT-Small)
-                 decoder_embed_dim=384,
-                 decoder_depth=12,
-                 decoder_num_heads=6,
-                 # Common params
-                 mlp_ratio=4.0,
-                 mask_ratio=0.75):
+    The master pipeline wrapper. 
+    Handles taking an image, running it through the entire forward process, AND calculating the MSE loss natively.
+    """
+    def __init__(self, img_size=224, patch_size=16, in_channels=3,
+                 encoder_embed_dim=768, encoder_depth=12, encoder_num_heads=12,
+                 decoder_embed_dim=384, decoder_depth=12, decoder_num_heads=6,
+                 mlp_ratio=4.0, norm_layer=nn.LayerNorm, mask_ratio=0.75):
         super().__init__()
+        
+        # Instantiate the two massive sub-networks
+        self.encoder = ViTEncoder(
+            img_size, patch_size, in_channels, encoder_embed_dim,
+            encoder_depth, encoder_num_heads, mlp_ratio
+        )
+        self.decoder = ViTDecoder(
+            self.encoder.num_patches, patch_size, encoder_embed_dim,
+            decoder_embed_dim, decoder_depth, decoder_num_heads, mlp_ratio
+        )
+        
+        # Save useful configuration parameters
         self.patch_size = patch_size
         self.img_size = img_size
-        self.mask_ratio = mask_ratio
-        self.num_patches = (img_size // patch_size) ** 2
 
-        # ---------- Encoder ----------
-        self.patch_embed = PatchEmbed(img_size, patch_size, in_channels, encoder_embed_dim)
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, encoder_embed_dim))
-
-        self.encoder_blocks = nn.ModuleList([
-            TransformerBlock(encoder_embed_dim, encoder_num_heads, mlp_ratio)
-            for _ in range(encoder_depth)
-        ])
-        self.encoder_norm = nn.LayerNorm(encoder_embed_dim)
-
-        # ---------- Decoder ----------
-        self.decoder_embed = nn.Linear(encoder_embed_dim, decoder_embed_dim, bias=True)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
-        self.decoder_pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, decoder_embed_dim))
-
-        self.decoder_blocks = nn.ModuleList([
-            TransformerBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio)
-            for _ in range(decoder_depth)
-        ])
-        self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
-
-        # Prediction head: patch pixels
-        self.decoder_pred = nn.Linear(
-            decoder_embed_dim, patch_size ** 2 * in_channels, bias=True)
-
-        # Initialize
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        # Positional embeddings (sinusoidal)
-        encoder_pos = get_2d_sincos_pos_embed(
-            self.pos_embed.shape[-1], int(self.num_patches ** 0.5))
-        self.pos_embed.data.copy_(torch.from_numpy(encoder_pos).float().unsqueeze(0))
-
-        decoder_pos = get_2d_sincos_pos_embed(
-            self.decoder_pos_embed.shape[-1], int(self.num_patches ** 0.5))
-        self.decoder_pos_embed.data.copy_(
-            torch.from_numpy(decoder_pos).float().unsqueeze(0))
-
-        # Patch embed (like nn.Linear)
-        w = self.patch_embed.proj.weight.data
-        nn.init.xavier_uniform_(w.view(w.shape[0], -1))
-
-        # Mask token
-        nn.init.normal_(self.mask_token, std=0.02)
-
-        # Apply to all other modules
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def forward_encoder(self, x, mask_ratio):
-        """Encode visible patches only.
-
-        Args:
-            x: (B, 3, H, W) input image
-            mask_ratio: fraction of patches to mask
-        Returns:
-            latent: (B, N_visible, encoder_embed_dim)
-            mask: (B, N) binary mask
-            ids_restore: (B, N)
+    def forward(self, imgs, mask_ratio=0.75):
         """
-        # Embed patches
-        x = self.patch_embed(x)  # (B, N, D)
-
-        # Add positional embeddings
-        x = x + self.pos_embed
-
-        # Random masking
-        x, mask, ids_restore, _ = random_masking(x, mask_ratio)
-
-        # Encoder transformer
-        for block in self.encoder_blocks:
-            x = block(x)
-        x = self.encoder_norm(x)
-
-        return x, mask, ids_restore
-
-    def forward_decoder(self, x, ids_restore):
-        """Decode: reconstruct all patches from visible latents + mask tokens.
-
-        Args:
-            x: (B, N_visible, encoder_embed_dim) encoder output
-            ids_restore: (B, N) ordering indices
-        Returns:
-            pred: (B, N, patch_size**2 * 3) pixel predictions
+        The complete training step computation for one batch of images.
         """
-        # Project to decoder dimension
-        x = self.decoder_embed(x)  # (B, N_visible, decoder_D)
+        
+        # 1. ENCODER PASS: Generate rich representations for ONLY the 49 visible patches.
+        # Outputs latent tokens, the binary mask mapping what was dropped, and the unshuffling `ids_restore` sequence.
+        latent, mask, ids_restore = self.encoder(imgs, ids_keep=None)
 
-        B, N_vis, D = x.shape
-        N = self.num_patches
+        # 2. DECODER PASS: Take the 49 visible encodings, inject 147 mask tokens, unshuffle them 
+        # using `ids_restore`, and predict all 196 patches of pixel data.
+        pred_pixels = self.decoder(latent, ids_restore)
 
-        # Append mask tokens for missing patches
-        mask_tokens = self.mask_token.expand(B, N - N_vis, -1)
-        x_ = torch.cat([x, mask_tokens], dim=1)  # (B, N, D)
+        # 3. COMPUTE LOSS NATIVELY IN THE MODEL
+        # We need the Ground Truth to compare against. Calculate the true pixel values matching our patches.
+        target_pixels = patchify(imgs, self.patch_size)
 
-        # Restore original ordering
-        x = torch.gather(x_, dim=1,
-                          index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
+        # Normalization trick: As per the MAE paper authors, calculating the MSE on *normalized* pixels per patch
+        # improves representation quality significantly.
+        # Calculate mean and variance of pixels within EACH PATCH independently.
+        mean = target_pixels.mean(dim=-1, keepdim=True)
+        var = target_pixels.var(dim=-1, keepdim=True)
+        # Normalize the ground truth patch pixels: N(0, 1)
+        target_normalized = (target_pixels - mean) / (var + 1e-6).sqrt()
 
-        # Add decoder positional embeddings
-        x = x + self.decoder_pos_embed
+        # Calculate Mean Squared Error (MSE) between Model Predictions and Normalized Ground Truth
+        loss = (pred_pixels - target_normalized) ** 2  # Shape: (Batch, 196 patches, 768 pixels)
+        loss = loss.mean(dim=-1)  # Average pixel error per patch: Shape (Batch, 196 patches)
 
-        # Decoder transformer
-        for block in self.decoder_blocks:
-            x = block(x)
-        x = self.decoder_norm(x)
+        # SUPER IMPORTANT: The loss is ONLY calculated on the masked patches! 
+        # If the model perfectly reconstructs the visible patches, we don't care, it was given that data!
+        # We multiply the loss vector by the binary mask (where 1=Masked, 0=Visible) to zero out visible errors.
+        loss = (loss * mask).sum() / mask.sum()  # Average loss over all masked patches in the batch.
 
-        # Predict pixel values per patch
-        x = self.decoder_pred(x)  # (B, N, patch_size**2 * 3)
-        return x
+        # Return the aggregated loss, the raw predictions, and the mask
+        return loss, pred_pixels, mask
 
-    def forward_loss(self, imgs, pred, mask):
-        """Compute MSE loss on masked patches only.
+# %% [markdown]
+# # Cell 5.2 — Model Instantiation & Parameter Count
 
-        Args:
-            imgs: (B, 3, H, W) original images
-            pred: (B, N, patch_size**2 * 3) predicted patches
-            mask: (B, N) binary mask (1=masked, 0=visible)
-        Returns:
-            loss: scalar, MSE on masked patches
-        """
-        target = patchify(imgs, self.patch_size)  # (B, N, P*P*3)
-
-        # Normalize target per-patch (as in original MAE paper)
-        mean = target.mean(dim=-1, keepdim=True)
-        var = target.var(dim=-1, keepdim=True)
-        target = (target - mean) / (var + 1e-6).sqrt()
-
-        # MSE on all patches
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # (B, N) per-patch loss
-
-        # Only average over masked patches
-        loss = (loss * mask).sum() / mask.sum()
-        return loss
-
-    def forward(self, imgs, mask_ratio=None):
-        """Full forward pass.
-
-        Args:
-            imgs: (B, 3, H, W) input images
-            mask_ratio: override mask ratio (default: self.mask_ratio)
-        Returns:
-            loss: reconstruction loss
-            pred: (B, N, P*P*3) predictions
-            mask: (B, N) binary mask
-        """
-        if mask_ratio is None:
-            mask_ratio = self.mask_ratio
-
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)
-        loss = self.forward_loss(imgs, pred, mask)
-        return loss, pred, mask
-
-
-# %% Cell 5.2 — Model Instantiation & Parameter Count
+# %%
 # === Model instantiation & parameter count ===
 
 model = MaskedAutoencoder(
@@ -865,7 +778,11 @@ print(f"Encoder parameters: {encoder_params:,} (~{encoder_params/1e6:.1f}M)")
 print(f"Decoder parameters: {decoder_params:,} (~{decoder_params/1e6:.1f}M)")
 print(f"Total parameters:   {total_params:,} (~{total_params/1e6:.1f}M)")
 
-# %% Cell 5.3 — Forward Pass Test
+# %% [markdown]
+# # Cell 5.3 — Forward Pass Test
+# 
+
+# %%
 # Quick forward pass test
 print("\n=== Forward Pass Test ===")
 with torch.no_grad():
@@ -879,8 +796,11 @@ with torch.no_grad():
 
 # %% [markdown]
 # ## Part 6: Training Loop
+# %% [markdown]
+# # Cell 6.1 — Optimizer, Scheduler & Scaler Setup
+# 
 
-# %% Cell 6.1 — Optimizer, Scheduler & Scaler Setup
+# %%
 # Move model to GPU(s)
 if num_gpus > 1:
     model = nn.DataParallel(model)
@@ -904,60 +824,103 @@ scaler = GradScaler()
 # Gradient clipping value
 MAX_GRAD_NORM = 1.0
 
-# %% Cell 6.2 — Training & Validation Functions
-# === Training Function ===
+# %% [markdown]
+# # Cell 6.2 — Training & Validation Functions
+# 
+
+# %%
+# ==============================================================================
+# PART 6: TRAINING ENGINE
+# This section defines the main logic for updating model weights during training.
+# Since MAE is computationally heavy, we use Mixed Precision (FP16) for a 2x speedup.
+# ==============================================================================
 
 def train_one_epoch(model, dataloader, optimizer, scaler, device, epoch):
-    model.train()
+    """
+    Executes one complete pass over the entire training dataset.
+    Updates the model weights based on the loss.
+    """
+    model.train()  # Tell PyTorch we are training (enables Dropout gradients, BatchNorm tracking, etc.)
     total_loss = 0.0
     num_batches = 0
 
+    # enumerate() gives us the batch index plus the actual batches of images.
     for batch_idx, images in enumerate(dataloader):
+        # Move the raw images to our GPU asynchronously
         images = images.to(device, non_blocking=True)
 
+        # 1. Zero out old gradients from the previous step. If not, they infinitely accumulate!
         optimizer.zero_grad()
 
-        # Mixed precision forward
+        # 2. MIXED PRECISION FORWARD PASS
+        # autocast() tells PyTorch to automatically use float16 precision for linear/conv layers
+        # where it is mathematically safe to do so. This speeds up T4 GPUs tremendously.
         with autocast():
             loss, pred, mask = model(images)
-            loss = loss.mean()  # Handle DataParallel vector output
+            loss = loss.mean()  # Critical fix for PyTorch DataParallel on multi-GPU Kaggle targets!
+                                # When using 2 GPUs natively, PyTorch returns an array of 2 independent losses.
+                                # Averaging them handles this implicitly.
 
-        # Mixed precision backward
+        # 3. BACKWARD PASS & SCALER
+        # Since float16 has a very small numeric range, gradients can "underflow" to zero.
+        # The GradScaler automatically multiples the loss by a large number, computers derivatives, 
+        # and then un-multiplies the results before pushing them into the optimizer.
         scaler.scale(loss).backward()
+        
+        # 4. GRADIENT CLIPPING
+        # Before taking the step, we 'un-scale' the gradients. 
+        # If any gradient is explosively high (>1.0), this function forcefully clips it to 1.0. 
+        # This prevents the model from diverging uncontrollably ("Exploding Gradients").
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+        
+        # 5. OPTIMIZER STEP
+        # The AdamW optimizer officially adjusts the neural network weights based on the computed gradients.
         scaler.step(optimizer)
         scaler.update()
 
-        total_loss += loss.item()
+        # Accumulate metrics for reporting
+        total_loss += loss.item() # .item() extracts the standard float value off the computation graph
         num_batches += 1
 
-        # Print progress every 100 batches
+        # Print a progress update every 100 mini-batches
         if (batch_idx + 1) % 100 == 0:
             avg = total_loss / num_batches
             print(f"  Epoch {epoch+1} | Batch {batch_idx+1}/{len(dataloader)} | "
                   f"Loss: {loss.item():.4f} | Avg: {avg:.4f}")
 
+    # Return the average loss calculated over this entire epoch
     return total_loss / num_batches
 
 
-@torch.no_grad()
+@torch.no_grad() # Decorator explicitly disabling all gradient tracking. Saves massive amounts of GPU memory during validation!
 def validate(model, dataloader, device):
-    model.eval()
+    """
+    Evaluates the model on unseen data.
+    Does NOT update the model weights. The goal here is solely to test real-world accuracy 
+    without "overfitting" or "memorizing" the training set.
+    """
+    model.eval() # Tell PyTorch we are evaluating (disables Dropout, freezes BatchNorms)
     total_loss = 0.0
     num_batches = 0
 
     for images in dataloader:
         images = images.to(device, non_blocking=True)
+        # We still use autocast during evaluation for inference speedup
         with autocast():
+            # In Validation, we calculate how far off our predicted pixels were from the actual original images.
             loss, pred, mask = model(images)
             loss = loss.mean()  # Handle DataParallel vector output
+            
         total_loss += loss.item()
         num_batches += 1
 
     return total_loss / num_batches
 
-# %% Cell 6.3 — Main Training Loop
+# %% [markdown]
+# # Cell 6.3 — Main Training Loop
+
+# %%
 # === Main Training Loop ===
 
 train_losses = []
@@ -1015,9 +978,12 @@ print(f"Training Complete! Best Val Loss: {best_val_loss:.4f}")
 print("=" * 60)
 
 # %% [markdown]
-# ## Part 7: Visualization Module
+# ## Part 7: Visualization Module 
+# %% [markdown]
+# # Cell 7.1 — Loss Plot
+# 
 
-# %% Cell 7.1 — Loss Plot
+# %%
 # === Loss Plot ===
 
 plt.figure(figsize=(10, 5))
@@ -1032,7 +998,11 @@ plt.tight_layout()
 plt.savefig('loss_plot.png', dpi=150, bbox_inches='tight')
 plt.show()
 
-# %% Cell 7.2 — Reconstruction Visualization (5 Samples)
+# %% [markdown]
+# # Cell 7.2 — Reconstruction Visualization (5 Samples)
+# 
+
+# %%
 # === Reconstruction Visualization ===
 
 @torch.no_grad()
@@ -1129,12 +1099,16 @@ checkpoint = torch.load('mae_best_model.pth', map_location=device)
 base_model.load_state_dict(checkpoint['model_state_dict'])
 print(f"Loaded best model from epoch {checkpoint['epoch']+1}")
 
-visualize_reconstruction(model, val_dataset, device, num_samples=5)
+visualize_reconstruction(model, val_dataset, device, num_samp
 
 # %% [markdown]
 # ## Part 8: Quantitative Evaluation (PSNR & SSIM)
+# %% [markdown]
+# # Cell 8.1 — Metric Functions & Evaluation
+# 
 
-# %% Cell 8.1 — Metric Functions & Evaluation
+# %%
+
 def compute_psnr(img1, img2, max_val=1.0):
     """Compute Peak Signal-to-Noise Ratio between two images.
 
@@ -1224,7 +1198,11 @@ def evaluate_metrics(model, dataset, device, num_samples=50, mask_ratio=0.75):
 # Run evaluation
 psnr_scores, ssim_scores = evaluate_metrics(model, val_dataset, device, num_samples=100)
 
-# %% Cell 8.2 — Metrics Distribution Plot
+# %% [markdown]
+# # Cell 8.2 — Metrics Distribution Plot
+# 
+
+# %%
 # Plot PSNR and SSIM distributions
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -1249,19 +1227,6 @@ plt.tight_layout()
 plt.savefig('metrics_distribution.png', dpi=150, bbox_inches='tight')
 plt.show()
 
-# %% [markdown]
-# ## Cell 9 — Summary
-# 
-# | Metric | Value |
-# |--------|-------|
-# | Architecture | MAE (ViT-Base Encoder + ViT-Small Decoder) |
-# | Encoder | 768-dim, 12 layers, 12 heads (~86M params) |
-# | Decoder | 384-dim, 12 layers, 6 heads (~22M params) |
-# | Mask Ratio | 75% |
-# | Loss Function | MSE (masked patches only) |
-# | Optimizer | AdamW |
-# | Scheduler | Cosine Annealing |
-# | Dataset | TinyImageNet (200 classes) |
 # %% [markdown]
 # ## Part 9: Gradio App Deployment
 # 
@@ -1477,3 +1442,17 @@ with gr.Blocks(
 # Launch the app
 print("\n🚀 Launching Gradio App...")
 demo.launch(share=True, server_name="0.0.0.0")
+
+# %% [markdown]
+# ## Cell 9 — Summary
+# # 
+# # | Metric | Value |
+# # |--------|-------|
+# # | Architecture | MAE (ViT-Base Encoder + ViT-Small Decoder) |
+# # | Encoder | 768-dim, 12 layers, 12 heads (~86M params) |
+# # | Decoder | 384-dim, 12 layers, 6 heads (~22M params) |
+# # | Mask Ratio | 75% |
+# # | Loss Function | MSE (masked patches only) |
+# # | Optimizer | AdamW |
+# # | Scheduler | Cosine Annealing |
+# # | Dataset | TinyImageNet (200 classes) |
