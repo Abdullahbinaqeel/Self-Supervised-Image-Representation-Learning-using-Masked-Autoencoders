@@ -920,6 +920,7 @@ def train_one_epoch(model, dataloader, optimizer, scaler, device, epoch):
         # Mixed precision forward
         with autocast():
             loss, pred, mask = model(images)
+            loss = loss.mean()  # Handle DataParallel vector output
 
         # Mixed precision backward
         scaler.scale(loss).backward()
@@ -950,6 +951,7 @@ def validate(model, dataloader, device):
         images = images.to(device, non_blocking=True)
         with autocast():
             loss, pred, mask = model(images)
+            loss = loss.mean()  # Handle DataParallel vector output
         total_loss += loss.item()
         num_batches += 1
 
