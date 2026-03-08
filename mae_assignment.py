@@ -1099,7 +1099,7 @@ checkpoint = torch.load('mae_best_model.pth', map_location=device)
 base_model.load_state_dict(checkpoint['model_state_dict'])
 print(f"Loaded best model from epoch {checkpoint['epoch']+1}")
 
-visualize_reconstruction(model, val_dataset, device, num_samp
+visualize_reconstruction(model, val_dataset, device, num_samples=5)
 
 # %% [markdown]
 # ## Part 8: Quantitative Evaluation (PSNR & SSIM)
