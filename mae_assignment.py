@@ -958,6 +958,8 @@ for epoch in range(NUM_EPOCHS):
             'train_loss': train_loss,
             'val_loss': val_loss,
         }, 'mae_best_model.pth')
+        # Also save the pure state_dict as a .pt file
+        torch.save(base_model.state_dict(), 'mae_best_weights.pt')
         print(f"  ✓ Best model saved (val_loss: {val_loss:.4f})")
 
     # Save checkpoint every 10 epochs
@@ -971,7 +973,9 @@ for epoch in range(NUM_EPOCHS):
             'train_losses': train_losses,
             'val_losses': val_losses,
         }, f'mae_checkpoint_epoch{epoch+1}.pth')
-        print(f"  ✓ Checkpoint saved at epoch {epoch+1}")
+        # Also save the pure state_dict as a .pt file too
+        torch.save(base_model.state_dict(), f'mae_weights_epoch{epoch+1}.pt')
+        print(f"  ✓ Checkpoint and weights (.pt) saved at epoch {epoch+1}")
 
 print("\n" + "=" * 60)
 print(f"Training Complete! Best Val Loss: {best_val_loss:.4f}")
